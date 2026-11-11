@@ -1,0 +1,43 @@
+// =====================================================================
+// CloudX Module 5 - KQL queries used in Application Insights > Logs
+// (classic table names: requests, traces, exceptions, customEvents, customMetrics)
+// =====================================================================
+
+// 1) All telemetry of one user session (session ID from the page footer)
+let sid = "E300BAA273DB3E57626885F05D842E22";
+union traces, customEvents, requests, dependencies, exceptions, pageViews
+| where timestamp > ago(2h)
+| where tostring(customDimensions.session_Id) == sid      // custom event property (petstoreapp)
+     or tostring(customDimensions.sessionId) == sid       // MDC key in log lines (all 4 services)
+     or message has sid                                   // session id written in the log text
+| project timestamp, itemType, cloud_RoleName, name, message, operation_Id
+| order by timestamp asc
+
+// 2) Same session, summarised per item type and service
+let sid = "E300BAA273DB3E57626885F05D842E22";
+union traces, customEvents, requests, dependencies, exceptions, pageViews
+| where timestamp > ago(2h)
+| where tostring(customDimensions.session_Id) == sid or tostring(customDimensions.sessionId) == sid or message has sid
+| summarize items = count() by itemType, cloud_RoleName
+| order by items desc
+
+// 3) Count "Cannot move further" exceptions in the last hour (sampling-aware)
+exceptions
+| where timestamp > ago(1h)
+| where outerMessage contains "Cannot move further" or innermostMessage contains "Cannot move further"
+| summarize exceptionCount = count(), estimatedWithSampling = sum(itemCount)
+
+// 4) Custom event: who requested which category
+customEvents
+| where timestamp > ago(1d) and name == "ProductsByCategoryRequested"
+| extend username = tostring(customDimensions.username),
+         session  = tostring(customDimensions.session_Id),
+         category = tostring(customDimensions.category)
+| summarize requests = count() by username, session, category
+| order by requests desc
+
+// 5) Custom metric: items returned per request over time
+customMetrics
+| where timestamp > ago(1d) and name == "ProductsReturnedCount"
+| summarize avgItems = avg(value), samples = sum(valueCount) by bin(timestamp, 5m)
+| render timechart

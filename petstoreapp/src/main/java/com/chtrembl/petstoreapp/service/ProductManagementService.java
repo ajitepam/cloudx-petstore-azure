@@ -13,7 +13,9 @@ import org.slf4j.MDC;
 import org.springframework.stereotype.Service;
 
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static com.chtrembl.petstoreapp.config.Constants.CATEGORY;
 import static com.chtrembl.petstoreapp.config.Constants.OPERATION;
@@ -30,7 +32,7 @@ public class ProductManagementService {
     private final ContainerEnvironment containerEnvironment;
     private final ProductServiceClient productServiceClient;
 
-    public Collection<Product> getProductsByCategory(String category, List<Tag> tags) {
+    public Collection<Product> getProductsByCategory(String category, List<Tag> tags) throws Exception {
         List<Product> products;
 
         MDC.put(OPERATION, "getProducts");
@@ -47,6 +49,18 @@ public class ProductManagementService {
                     String.format("PetStoreApp user %s is requesting to retrieve products from the ProductService",
                             this.sessionUser.getName()),
                     this.sessionUser.getCustomEventProperties(), null);
+
+            // Module 5 (T5): custom event - WHO is requesting (username + session) and WHAT (category)
+            Map<String, String> requestProperties = new HashMap<>(this.sessionUser.getCustomEventProperties());
+            requestProperties.put("username", this.sessionUser.getName());
+            requestProperties.put("category", category);
+            this.sessionUser.getTelemetryClient().trackEvent("ProductsByCategoryRequested", requestProperties, null);
+
+            // Module 5 (T7): intentional error for the monitoring exercise.
+            // On by default; set env PETSTORE_SIMULATE_ERROR=false to switch it off without a rebuild.
+            if (!"false".equalsIgnoreCase(System.getenv("PETSTORE_SIMULATE_ERROR"))) {
+                throw new Exception("Cannot move further");
+            }
 
             products = productServiceClient.getProductsByStatus(AVAILABLE.getValue());
             this.sessionUser.setProducts(products);
@@ -65,6 +79,11 @@ public class ProductManagementService {
 
             log.info("Successfully retrieved {} products for category {} with tags {} [RequestID: {}, TraceID: {}]",
                     products.size(), category, tags, requestId, traceId);
+
+            // Module 5 (T5): log + custom metric - HOW MANY items were returned to the user
+            log.info("ProductsReturnedCount={} returned to user {} (session {}) for category {}",
+                    products.size(), this.sessionUser.getName(), this.sessionUser.getSessionId(), category);
+            this.sessionUser.getTelemetryClient().trackMetric("ProductsReturnedCount", products.size());
 
             return products;
         } catch (FeignException fe) {

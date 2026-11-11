@@ -1,4 +1,4 @@
-# PetStore on Azure (CloudX Modules 3-4)
+# PetStore on Azure (CloudX Modules 3-5)
 
 Updated PetStore solution used for the EPAM CloudX "Associate MS Azure Developer (Java)" tasks:
 - **Module 3** - Azure App Services
@@ -72,3 +72,55 @@ Environment variables (https FQDNs of the APIs):
   ```bash
   for i in $(seq 1 50); do curl -s https://petstoreapp.<env-domain>/ | grep -o 'petstoreapp--[a-z0-9]*' | head -1; done | sort | uniq -c
   ```
+
+## Module 5 - Monitoring and Logging (Application Insights)
+
+Hosting: **Azure Container Apps** (same pattern as Module 4) in resource group `module5-rg`, environment `petstore-env` (East US).
+Container Apps has no codeless Java agent, so every service attaches the **Application Insights Java agent 3.7.1** itself
+(runtime attach as the first statement of `main()`), and all four services send telemetry to **one** workspace-based
+Application Insights resource (`petstore-ai` -> Log Analytics `petstore-law`, retention 30 days, daily cap 1 GB).
+
+| Container App | Image | Ingress | App Insights role name |
+|---|---|---|---|
+| `petstoreproductservice` | `petstoreproductservice:m5` | internal | `petstoreproductservice` |
+| `petstorepetservice` | `petstorepetservice:m5` | internal | `petstorepetservice` |
+| `petstoreorderservice` | `petstoreorderservice:m5` | internal | `petstoreorderservice` |
+| `petstoreapp` (Web) | `petstoreapp:m5` -> `m5-err` | external | `petstoreapp` |
+
+Every app gets `APPLICATIONINSIGHTS_CONNECTION_STRING` from the Container Apps **secret** `ai-conn` and its own
+`APPLICATIONINSIGHTS_ROLE_NAME` (separate nodes on the Application Map).
+
+### Code changes for Module 5
+- `petstorepetservice`, `petstoreproductservice`, `petstoreorderservice`:
+  - `pom.xml`: `com.microsoft.azure:applicationinsights-runtime-attach:3.7.1`.
+  - `*Application.java`: `attachApplicationInsights()` before Spring starts (same `APPLICATIONINSIGHTS_ENABLED` switch as petstoreapp).
+  - `Dockerfile`: runtime image `eclipse-temurin:21-jdk-alpine` (was `-jre-alpine`) - runtime attach needs the JDK Attach API.
+- `petstoreapp` - `ProductManagementService#getProductsByCategory()`:
+  - custom event `ProductsByCategoryRequested` with properties `username`, `session_Id`, `category` (who is requesting);
+  - log line + custom metric `ProductsReturnedCount` (how many products were returned);
+  - intentional error `throw new Exception("Cannot move further")` (on by default, `PETSTORE_SIMULATE_ERROR=false` switches it off);
+    the method and `PetStoreFacadeService#getProducts()` declare `throws Exception`.
+
+### Issues found and fixed
+1. **Runtime attach failed on the JRE image** for the back-ends (`No compatible attachment provider is available`).
+   petstoreapp worked because its Azure SDK dependencies bring JNA (ByteBuddy's emulated attach). Fix: JDK runtime image.
+2. **Misleading success message**: `ApplicationInsights.attach()` does not throw on failure, so "enabled successfully"
+   was printed even when the agent did not start. Fix: message now points to the agent's own
+   `Application Insights Java Agent ... started successfully` line.
+
+### Files added for Module 5
+- `scripts/deploy-module5.sh` - idempotent Azure CLI automation:
+  ```bash
+  export MSYS_NO_PATHCONV=1                       # Git Bash on Windows
+  ./scripts/deploy-module5.sh infra               # RG + Log Analytics + App Insights
+  ./scripts/deploy-module5.sh build m5            # build + push the 4 images (WSL Docker)
+  ./scripts/deploy-module5.sh deploy m5           # ACA env + 4 apps (secret, role names)
+  ./scripts/deploy-module5.sh verify              # agent start line per container
+  ./scripts/deploy-module5.sh web m5-err          # deploy the version with the error
+  ./scripts/deploy-module5.sh kql-session <id>    # telemetry of one session
+  ./scripts/deploy-module5.sh kql-errors          # count "Cannot move further" (last hour)
+  ./scripts/deploy-module5.sh metric              # ProductsReturnedCount
+  ./scripts/deploy-module5.sh scale 0             # scale to zero overnight
+  ./scripts/deploy-module5.sh cleanup             # delete module5-rg
+  ```
+- `kql/module5-queries.kql` - the KQL queries (session filter, exception count, custom event and metric).
